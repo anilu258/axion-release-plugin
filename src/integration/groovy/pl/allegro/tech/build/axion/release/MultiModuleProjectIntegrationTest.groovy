@@ -7,7 +7,7 @@ import java.util.stream.Collectors
 class MultiModuleProjectIntegrationTest extends BaseIntegrationTest {
 
     File getSubmoduleDir(String projectName) {
-        return new File(temporaryFolder.root, projectName)
+        return new File(temporaryFolder, projectName)
     }
 
     void generateSubmoduleBuildFile(String projectName) {
@@ -53,14 +53,14 @@ class MultiModuleProjectIntegrationTest extends BaseIntegrationTest {
         List<String> submodules = ["project1", "project2"]
         buildFile('''
         scmVersion {
-            monorepos {
-                projectDirs = project.subprojects.collect({p -> p.name})
+            monorepo {
+                exclude(project.subprojects.collect({p -> p.name}))
             }
         }
         '''
         )
-        generateSettingsFile(temporaryFolder.root, submodules)
-        generateGitIgnoreFile(temporaryFolder.root)
+        generateSettingsFile(temporaryFolder, submodules)
+        generateGitIgnoreFile(temporaryFolder)
 
         repository.commit(['.'], "initial commit of top level project")
 
@@ -156,7 +156,7 @@ class MultiModuleProjectIntegrationTest extends BaseIntegrationTest {
     def "change to root project should not change child project versions"() {
         given:
         initialProjectConfiguration()
-        File dummy = new File(temporaryFolder.root, "dummy.txt")
+        File dummy = new File(temporaryFolder, "dummy.txt")
         dummy.createNewFile()
         repository.commit(["dummy.txt"], "commit parent project")
         runGradle(":release", "-Prelease.version=4.0.0", '-Prelease.localOnly', '-Prelease.disableChecks')

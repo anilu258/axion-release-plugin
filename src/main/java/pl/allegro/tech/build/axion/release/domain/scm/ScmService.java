@@ -1,14 +1,16 @@
 package pl.allegro.tech.build.axion.release.domain.scm;
 
+import org.eclipse.jgit.transport.RemoteRefUpdate;
+import org.gradle.api.logging.Logger;
+import org.gradle.api.logging.Logging;
 import pl.allegro.tech.build.axion.release.domain.LocalOnlyResolver;
-import pl.allegro.tech.build.axion.release.domain.logging.ReleaseLogger;
 
 import java.util.List;
 import java.util.Optional;
 
 public class ScmService {
+    private static final Logger logger = Logging.getLogger(ScmService.class);
 
-    private static final ReleaseLogger logger = ReleaseLogger.Factory.logger(ScmService.class);
     private final LocalOnlyResolver localOnlyResolver;
     private final ScmProperties scmProperties;
     private ScmRepository repository;
@@ -35,7 +37,7 @@ public class ScmService {
     public ScmPushResult push() {
         if (localOnlyResolver.localOnly(this.remoteAttached())) {
             logger.quiet("Changes made to local repository only");
-            return new ScmPushResult(true, Optional.empty());
+            return new ScmPushResult(true, Optional.of(RemoteRefUpdate.Status.NOT_ATTEMPTED), Optional.empty());
         }
 
         try {
@@ -62,5 +64,9 @@ public class ScmService {
 
     public List<String> lastLogMessages(int messageCount) {
         return repository.lastLogMessages(messageCount);
+    }
+
+    public boolean isLegacyDefTagnameRepo() {
+        return repository.isLegacyDefTagnameRepo();
     }
 }

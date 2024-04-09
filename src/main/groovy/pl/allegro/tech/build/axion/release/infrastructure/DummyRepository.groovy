@@ -1,6 +1,7 @@
 package pl.allegro.tech.build.axion.release.infrastructure
 
-import pl.allegro.tech.build.axion.release.domain.logging.ReleaseLogger
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
 import pl.allegro.tech.build.axion.release.domain.scm.ScmIdentity
 import pl.allegro.tech.build.axion.release.domain.scm.ScmPosition
 import pl.allegro.tech.build.axion.release.domain.scm.ScmPushOptions
@@ -12,7 +13,7 @@ import java.util.regex.Pattern
 
 class DummyRepository implements ScmRepository {
 
-    private static final ReleaseLogger logger = ReleaseLogger.Factory.logger(DummyRepository)
+    private static final Logger logger = LoggerFactory.getLogger(DummyRepository)
 
     DummyRepository() {
     }
@@ -39,7 +40,7 @@ class DummyRepository implements ScmRepository {
     @Override
     ScmPushResult push(ScmIdentity identity, ScmPushOptions pushOptions) {
         log('push')
-        return new ScmPushResult(true, Optional.empty())
+        return new ScmPushResult(true, Optional.empty(), Optional.empty())
     }
 
     @Override
@@ -58,8 +59,13 @@ class DummyRepository implements ScmRepository {
     }
 
     @Override
-    ScmPosition positionOfLastChangeIn(String path, List<String> excludeSubFolders) {
+    ScmPosition positionOfLastChangeIn(String path, List<String> excludeSubFolders, Set<String> dependenciesFolders) {
         return new ScmPosition('', '', 'master')
+    }
+
+    @Override
+    Boolean isIdenticalForPath(String path, String latestChangeRevision, String tagCommitRevision) {
+        return false
     }
 
     @Override

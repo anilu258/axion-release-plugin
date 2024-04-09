@@ -1,6 +1,8 @@
 package pl.allegro.tech.build.axion.release.infrastructure.git
 
 import org.ajoberstar.grgit.Grgit
+import org.eclipse.jgit.api.Git
+import org.eclipse.jgit.api.MergeCommand
 import org.eclipse.jgit.api.errors.RefAlreadyExistsException
 import org.eclipse.jgit.lib.Config
 import org.eclipse.jgit.lib.Constants
@@ -14,11 +16,12 @@ import java.util.regex.Pattern
 
 import static java.util.regex.Pattern.compile
 import static pl.allegro.tech.build.axion.release.TagPrefixConf.fullPrefix
-import static pl.allegro.tech.build.axion.release.TagPrefixConf.prefix
+import static pl.allegro.tech.build.axion.release.TagPrefixConf.defaultPrefix
 import static pl.allegro.tech.build.axion.release.domain.scm.ScmPropertiesBuilder.scmProperties
 
 class GitRepositoryTest extends Specification {
 
+    public static final String MASTER_BRANCH = "master"
     File repositoryDir
 
     File remoteRepositoryDir
@@ -68,7 +71,7 @@ class GitRepositoryTest extends Specification {
 
         when:
         lightweightTagRepository.tag(fullPrefix() + '2')
-        TagsOnCommit tags = lightweightTagRepository.latestTags(compile('^' + prefix() + '.*'))
+        TagsOnCommit tags = lightweightTagRepository.latestTags(compile('^' + defaultPrefix() + '.*'))
 
         then:
         tags.tags == [fullPrefix() + '1', fullPrefix() + '2']
@@ -129,7 +132,7 @@ class GitRepositoryTest extends Specification {
         repository.commit(['*'], "commit after release")
 
         when:
-        TagsOnCommit tags = repository.latestTags(Pattern.compile('^' + prefix() + '.*'))
+        TagsOnCommit tags = repository.latestTags(Pattern.compile('^' + defaultPrefix() + '.*'))
 
         then:
         tags.tags == [fullPrefix() + '1']
@@ -140,7 +143,7 @@ class GitRepositoryTest extends Specification {
         GitRepository commitlessRepository = GitProjectBuilder.gitProject(File.createTempDir('axion-release', 'tmp')).build()[GitRepository]
 
         when:
-        TagsOnCommit tags = commitlessRepository.latestTags(Pattern.compile('^' + prefix() + '.*'))
+        TagsOnCommit tags = commitlessRepository.latestTags(Pattern.compile('^' + defaultPrefix() + '.*'))
 
         then:
         tags.tags == []
@@ -151,7 +154,7 @@ class GitRepositoryTest extends Specification {
         repository.tag(fullPrefix() + '1')
 
         when:
-        TagsOnCommit tags = repository.latestTags(Pattern.compile('' + prefix() + '.*'))
+        TagsOnCommit tags = repository.latestTags(Pattern.compile('' + defaultPrefix() + '.*'))
 
         then:
         tags.tags == [fullPrefix() + '1']
@@ -168,7 +171,7 @@ class GitRepositoryTest extends Specification {
         repository.commit(['*'], "bugfix after " + fullPrefix() + "1")
 
         when:
-        TagsOnCommit tags = repository.latestTags(Pattern.compile("^" + prefix() + ".*"))
+        TagsOnCommit tags = repository.latestTags(Pattern.compile("^" + defaultPrefix() + ".*"))
 
         then:
         tags.tags == [fullPrefix() + '1']
@@ -189,7 +192,7 @@ class GitRepositoryTest extends Specification {
         repository.commit(['*'], "commit after " + fullPrefix() + "3")
 
         when:
-        List<TagsOnCommit> allTaggedCommits = repository.taggedCommits(Pattern.compile('^' + prefix() + '.*'))
+        List<TagsOnCommit> allTaggedCommits = repository.taggedCommits(Pattern.compile('^' + defaultPrefix() + '.*'))
 
         then:
         allTaggedCommits.collect { c -> c.tags[0] } == [fullPrefix() +'3',fullPrefix() + '4', fullPrefix() + '2', fullPrefix() +'1']
@@ -202,7 +205,7 @@ class GitRepositoryTest extends Specification {
         repository.tag('otherTag')
 
         when:
-        TagsOnCommit tags = repository.latestTags(Pattern.compile('^' + prefix() + '.*'))
+        TagsOnCommit tags = repository.latestTags(Pattern.compile('^' + defaultPrefix() + '.*'))
 
         then:
         tags.tags == [fullPrefix() + '1']
@@ -229,7 +232,7 @@ class GitRepositoryTest extends Specification {
         repository.tag(fullPrefix() + '2')
 
         when:
-        TagsOnCommit tags = repository.latestTags(Pattern.compile('^' + prefix() + '.*'))
+        TagsOnCommit tags = repository.latestTags(Pattern.compile('^' + defaultPrefix() + '.*'))
 
         then:
         tags.tags == [fullPrefix() + '1', fullPrefix() + '2']
@@ -266,6 +269,26 @@ class GitRepositoryTest extends Specification {
         String headCommitId = rawRepository.repository.jgit.repository.resolve(Constants.HEAD).name()
         rawRepository.repository.jgit.checkout().setName(headCommitId).call()
 
+        when:
+        ScmPosition position = repository.currentPosition()
+
+        then:
+        position.branch == 'HEAD'
+    }
+
+    def "should provide current branch name as HEAD when in detached state and overriddenBranchName is empty"() {
+        given:
+        File repositoryDir = File.createTempDir('axion-release', 'tmp')
+        def scmProperties = scmProperties(repositoryDir)
+            .withOverriddenBranchName("")
+            .build()
+        Map repositories = GitProjectBuilder.gitProject(repositoryDir, remoteRepositoryDir).usingProperties(scmProperties).build()
+
+        Grgit rawRepository = repositories[Grgit]
+        GitRepository repository = repositories[GitRepository]
+
+        String headCommitId = rawRepository.repository.jgit.repository.resolve(Constants.HEAD).name()
+        rawRepository.repository.jgit.checkout().setName(headCommitId).call()
         when:
         ScmPosition position = repository.currentPosition()
 
@@ -501,9 +524,70 @@ class GitRepositoryTest extends Specification {
         repository.commit([fileInB], 'Add file bar in subdirB')
 
         when:
-        ScmPosition position = repository.positionOfLastChangeIn('a\\aa', [])
+        ScmPosition position = repository.positionOfLastChangeIn('a\\aa', [], [].toSet())
 
         then:
         position.revision == headSubDirAChanged
     }
+
+    def "last position with monorepo paths case: merge after squash"() {
+        given:
+        Git git = repository.getJgitRepository();
+        commitFile('b4/aa', 'b4')
+        commitFile('b4/ab', 'b4b')
+
+        String importantDir = 'a/aa'
+
+        commitFile(importantDir, 'foo')
+        String headSubDirAChanged = rawRepository.head().id
+
+        String secondBranchName = "feature/unintresting_changes";
+        git.branchCreate().setName(secondBranchName).call()
+        git.checkout().setName(secondBranchName).call()
+        commitFile('second/aa', 'foo')
+        commitFile('b/ba', 'bar')
+        git.checkout().setName(MASTER_BRANCH).call()
+        git.merge().include(git.repository.resolve(secondBranchName)).setCommit(true).setMessage("unintresting").setFastForward(MergeCommand.FastForwardMode.NO_FF).call()
+
+        commitFile('after/aa', 'after')
+
+        when:
+        ScmPosition position = repository.positionOfLastChangeIn(importantDir, [], [].toSet())
+
+        then:
+        position.revision == headSubDirAChanged
+    }
+
+    def "last position with monorepo dependency config - change made in dependency folder"() {
+        given:
+        String importantDir = 'a/aa'
+        String dependencyDir = 'b/bb'
+        String notInterestingDir = 'c/cc'
+
+
+        commitFile(notInterestingDir, 'unintresting1')
+        commitFile(notInterestingDir, 'unintresting2')
+
+        commitFile(importantDir, 'main_dir')
+        commitFile(dependencyDir, 'dep_dir')
+        String headSubDirAChanged = rawRepository.head().id
+
+        commitFile(notInterestingDir, 'non_intresting')
+
+        commitFile('after/aa', 'after')
+
+        when:
+        ScmPosition position = repository.positionOfLastChangeIn(importantDir, [], [dependencyDir].toSet())
+
+        then:
+        position.revision == headSubDirAChanged
+    }
+
+    private void commitFile(String subDir, String fileName) {
+        String fileInA = "${subDir}/${fileName}"
+        new File(repositoryDir, subDir).mkdirs()
+        new File(repositoryDir, fileInA).createNewFile()
+        repository.commit([fileInA], "Add file ${fileName} in ${subDir}")
+    }
+
 }

@@ -1,30 +1,64 @@
 package pl.allegro.tech.build.axion.release.infrastructure.git;
 
-import org.eclipse.jgit.api.*;
+import org.eclipse.jgit.api.AddCommand;
+import org.eclipse.jgit.api.FetchCommand;
+import org.eclipse.jgit.api.Git;
+import org.eclipse.jgit.api.LogCommand;
+import org.eclipse.jgit.api.PushCommand;
+import org.eclipse.jgit.api.Status;
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.api.errors.NoHeadException;
+import org.eclipse.jgit.diff.DiffFormatter;
 import org.eclipse.jgit.errors.RepositoryNotFoundException;
-import org.eclipse.jgit.lib.*;
+import org.eclipse.jgit.lib.AnyObjectId;
+import org.eclipse.jgit.lib.BranchTrackingStatus;
+import org.eclipse.jgit.lib.Config;
+import org.eclipse.jgit.lib.Constants;
+import org.eclipse.jgit.lib.ObjectId;
+import org.eclipse.jgit.lib.Ref;
+import org.eclipse.jgit.lib.Repository;
+import org.eclipse.jgit.lib.StoredConfig;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevSort;
 import org.eclipse.jgit.revwalk.RevWalk;
-import org.eclipse.jgit.transport.*;
-import pl.allegro.tech.build.axion.release.domain.logging.ReleaseLogger;
-import pl.allegro.tech.build.axion.release.domain.scm.*;
+import org.eclipse.jgit.transport.PushResult;
+import org.eclipse.jgit.transport.RemoteConfig;
+import org.eclipse.jgit.transport.RemoteRefUpdate;
+import org.eclipse.jgit.transport.TagOpt;
+import org.eclipse.jgit.transport.URIish;
+import org.eclipse.jgit.treewalk.filter.PathFilter;
+import org.eclipse.jgit.util.SystemReader;
+import org.eclipse.jgit.util.io.DisabledOutputStream;
+import org.gradle.api.logging.Logger;
+import org.gradle.api.logging.Logging;
+import pl.allegro.tech.build.axion.release.domain.scm.ScmException;
+import pl.allegro.tech.build.axion.release.domain.scm.ScmIdentity;
+import pl.allegro.tech.build.axion.release.domain.scm.ScmPosition;
+import pl.allegro.tech.build.axion.release.domain.scm.ScmProperties;
+import pl.allegro.tech.build.axion.release.domain.scm.ScmPushOptions;
+import pl.allegro.tech.build.axion.release.domain.scm.ScmPushResult;
+import pl.allegro.tech.build.axion.release.domain.scm.ScmRepository;
+import pl.allegro.tech.build.axion.release.domain.scm.ScmRepositoryUnavailableException;
+import pl.allegro.tech.build.axion.release.domain.scm.TagsOnCommit;
 
 import java.io.File;
 import java.io.IOException;
 import java.net.URISyntaxException;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.Optional;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 
-import static pl.allegro.tech.build.axion.release.TagPrefixConf.*;
+import static pl.allegro.tech.build.axion.release.TagPrefixConf.fullLegacyPrefix;
 
 public class GitRepository implements ScmRepository {
+    private static final Logger logger = Logging.getLogger(GitRepository.class);
 
-    private static final ReleaseLogger logger = ReleaseLogger.Factory.logger(GitRepository.class);
     private static final String GIT_TAG_PREFIX = "refs/tags/";
 
     private final TransportConfigFactory transportConfigFactory = new TransportConfigFactory();
@@ -33,6 +67,8 @@ public class GitRepository implements ScmRepository {
     private final ScmProperties properties;
 
     public GitRepository(ScmProperties properties) {
+        SystemReader.setInstance(new SystemReaderWithoutSystemConfig());
+
         try {
             this.repositoryDir = properties.getDirectory();
             this.jgitRepository = Git.open(repositoryDir);
@@ -129,11 +165,9 @@ public class GitRepository implements ScmRepository {
     }
 
     public ScmPushResult push(ScmIdentity identity, ScmPushOptions pushOptions, boolean all) {
-        PushCommand command = pushCommand(identity, pushOptions.getRemote(), all);
-
-        // command has to be called twice:
-        // once for commits (only if needed)
+        // push once for commits (only if needed)
         if (!pushOptions.isPushTagsOnly()) {
+            PushCommand command = pushCommand(identity, pushOptions.getRemote(), all);
             ScmPushResult result = verifyPushResults(callPush(command));
             if (!result.isSuccess()) {
                 return result;
@@ -141,7 +175,9 @@ public class GitRepository implements ScmRepository {
 
         }
 
-        // and another time for tags
+        // and again for tags
+        // Note: push commands can *not* be re-used.
+        PushCommand command = pushCommand(identity, pushOptions.getRemote(), all);
         return verifyPushResults(callPush(command.setPushTags()));
     }
 
@@ -158,11 +194,16 @@ public class GitRepository implements ScmRepository {
 
         Optional<RemoteRefUpdate> failedRefUpdate = pushResult.getRemoteUpdates().stream().filter(ref ->
             !ref.getStatus().equals(RemoteRefUpdate.Status.OK)
-                && !ref.getStatus().equals(RemoteRefUpdate.Status.UP_TO_DATE)
+            && !ref.getStatus().equals(RemoteRefUpdate.Status.UP_TO_DATE)
         ).findFirst();
 
+        boolean isSuccess = !failedRefUpdate.isPresent();
+        Optional<RemoteRefUpdate.Status> failureCause = isSuccess ?
+            Optional.empty() : Optional.of(failedRefUpdate.get().getStatus());
+
         return new ScmPushResult(
-            !failedRefUpdate.isPresent(),
+            isSuccess,
+            failureCause,
             Optional.ofNullable(pushResult.getMessages())
         );
     }
@@ -218,24 +259,28 @@ public class GitRepository implements ScmRepository {
     }
 
     @Override
-    public ScmPosition positionOfLastChangeIn(String path, List<String> excludeSubFolders) {
+    public ScmPosition positionOfLastChangeIn(String path, List<String> excludeSubFolders, Set<String> dependenciesFolders) {
         RevCommit lastCommit;
 
         // if the path is empty ('') then it means we are at the root of the Git directory
         // in which case, we should exclude changes that occurred in subdirectory projects when deciding on
         // which is the latest change that is relevant to the root project
         try {
+            LogCommand logCommand;
             if (path.isEmpty()) {
-                LogCommand logCommand = jgitRepository.log().setMaxCount(1);
+                logCommand = jgitRepository.log().setMaxCount(1);
                 for (String excludedPath : excludeSubFolders) {
                     logCommand.excludePath(asUnixPath(excludedPath));
                 }
-                lastCommit = logCommand.call().iterator().next();
             } else {
                 String unixStylePath = asUnixPath(path);
                 assertPathExists(unixStylePath);
-                lastCommit = jgitRepository.log().setMaxCount(1).addPath(unixStylePath).call().iterator().next();
+                logCommand = jgitRepository.log().setMaxCount(1).addPath(unixStylePath);
+                for (String dep : dependenciesFolders) {
+                    logCommand.addPath(asUnixPath(dep));
+                }
             }
+            lastCommit = logCommand.call().iterator().next();
         } catch (GitAPIException e) {
             throw new ScmException(e);
         }
@@ -246,14 +291,30 @@ public class GitRepository implements ScmRepository {
             return currentPosition;
         }
 
-        String revision = lastCommit.getName();
-        if (revision.equals(currentPosition.getRevision())) {
-            return currentPosition;
-        } else {
-            return new ScmPosition(
-                revision,
-                currentPosition.getBranch()
-            );
+        return new ScmPosition(
+            lastCommit.getName(),
+            currentPosition.getBranch(),
+            currentPosition.getIsClean()
+        );
+    }
+
+    @Override
+    public Boolean isIdenticalForPath(String path, String latestChangeRevision, String tagCommitRevision) {
+        if (latestChangeRevision.isEmpty() || tagCommitRevision.isEmpty()) {
+            return false;
+        }
+        if (latestChangeRevision.equals(tagCommitRevision)) {
+            return true;
+        }
+        try {
+            ObjectId lastChange = jgitRepository.getRepository().resolve(latestChangeRevision);
+            ObjectId taggedCommit = jgitRepository.getRepository().resolve(tagCommitRevision);
+            DiffFormatter diffFormatter = new DiffFormatter(DisabledOutputStream.INSTANCE);
+            diffFormatter.setPathFilter(PathFilter.create(asUnixPath(path)));
+            diffFormatter.setRepository(jgitRepository.getRepository());
+            return diffFormatter.scan(lastChange, taggedCommit).isEmpty();
+        } catch (IOException e) {
+            throw new ScmException(e);
         }
     }
 
@@ -279,8 +340,10 @@ public class GitRepository implements ScmRepository {
                 revision = head.name();
             }
 
+            boolean isClean = !checkUncommittedChanges();
+
             String branchName = branchName();
-            return new ScmPosition(revision, branchName);
+            return new ScmPosition(revision, branchName, isClean);
         } catch (IOException e) {
             throw new ScmException(e);
         }
@@ -296,7 +359,7 @@ public class GitRepository implements ScmRepository {
             .map(Repository::shortenRefName)
             .orElse(null);
 
-        if ("HEAD".equals(branchName) && properties.getOverriddenBranchName() != null) {
+        if ("HEAD".equals(branchName) && properties.getOverriddenBranchName() != null && !properties.getOverriddenBranchName().isEmpty()) {
             branchName = Repository.shortenRefName(properties.getOverriddenBranchName());
         }
 
@@ -478,9 +541,9 @@ public class GitRepository implements ScmRepository {
     public boolean isLegacyDefTagnameRepo() {
         try {
             List<Ref> call = jgitRepository.tagList().call();
-            if(call.isEmpty()) return false;
+            if (call.isEmpty()) return false;
 
-            return call.stream().allMatch(ref-> ref.getName().startsWith("refs/tags/"+fullLegacyPrefix()));
+            return call.stream().allMatch(ref -> ref.getName().startsWith("refs/tags/" + fullLegacyPrefix()));
         } catch (GitAPIException e) {
             throw new ScmException(e);
         }
@@ -495,5 +558,9 @@ public class GitRepository implements ScmRepository {
         } catch (GitAPIException e) {
             throw new ScmException(e);
         }
+    }
+
+    public Git getJgitRepository() {
+        return jgitRepository;
     }
 }

@@ -1,9 +1,9 @@
 package pl.allegro.tech.build.axion.release.domain
 
+import pl.allegro.tech.build.axion.release.Fixtures
 import pl.allegro.tech.build.axion.release.RepositoryBasedTest
-import pl.allegro.tech.build.axion.release.TagPrefixConf
 import pl.allegro.tech.build.axion.release.domain.properties.*
-import pl.allegro.tech.build.axion.release.infrastructure.di.Context
+import pl.allegro.tech.build.axion.release.infrastructure.di.VersionResolutionContext
 import spock.lang.Shared
 
 import static pl.allegro.tech.build.axion.release.TagPrefixConf.*
@@ -20,11 +20,10 @@ class VersionResolverSubfolderTest extends RepositoryBasedTest {
     NextVersionProperties nextVersionRules = nextVersionProperties().build()
 
     @Shared
-    MonorepoProperties defaultMonorepoProperties = MonorepoPropertiesBuilder.monorepoProperties()
-        .build()
+    MonorepoConfig defaultMonorepoProperties = Fixtures.monorepoConfig()
 
     VersionProperties defaultMonorepoVersionRules = VersionPropertiesBuilder.versionProperties()
-        .supportMonorepos(defaultMonorepoProperties)
+        .supportMonorepo(defaultMonorepoProperties)
         .build()
 
     String projectRootSubfolder
@@ -112,7 +111,7 @@ class VersionResolverSubfolderTest extends RepositoryBasedTest {
         repository.commit(['*'], 'Commit without change in subfolder')
 
         VersionProperties versionRules = VersionPropertiesBuilder.versionProperties()
-            .supportMonorepos(defaultMonorepoProperties)
+            .supportMonorepo(defaultMonorepoProperties)
             .forceSnapshot()
             .build()
         configureContextWithVersionRules(versionRules)
@@ -143,8 +142,8 @@ class VersionResolverSubfolderTest extends RepositoryBasedTest {
 
         where:
         versionRules << [
-            VersionPropertiesBuilder.versionProperties().supportMonorepos(defaultMonorepoProperties).build(),
-            VersionPropertiesBuilder.versionProperties().supportMonorepos(defaultMonorepoProperties).forceSnapshot().build()
+            VersionPropertiesBuilder.versionProperties().supportMonorepo(defaultMonorepoProperties).build(),
+            VersionPropertiesBuilder.versionProperties().supportMonorepo(defaultMonorepoProperties).forceSnapshot().build()
         ]
     }
 
@@ -171,8 +170,8 @@ class VersionResolverSubfolderTest extends RepositoryBasedTest {
 
         where:
         versionRules << [
-            VersionPropertiesBuilder.versionProperties().supportMonorepos(defaultMonorepoProperties).useHighestVersion().build(),
-            VersionPropertiesBuilder.versionProperties().supportMonorepos(defaultMonorepoProperties).useHighestVersion().forceSnapshot().build()
+            VersionPropertiesBuilder.versionProperties().supportMonorepo(defaultMonorepoProperties).useHighestVersion().build(),
+            VersionPropertiesBuilder.versionProperties().supportMonorepo(defaultMonorepoProperties).useHighestVersion().forceSnapshot().build()
         ]
     }
 
@@ -199,17 +198,17 @@ class VersionResolverSubfolderTest extends RepositoryBasedTest {
 
         where:
         versionRules << [
-            VersionPropertiesBuilder.versionProperties().supportMonorepos(defaultMonorepoProperties).useHighestVersion().build(),
-            VersionPropertiesBuilder.versionProperties().supportMonorepos(defaultMonorepoProperties).useHighestVersion().forceSnapshot().build()
+            VersionPropertiesBuilder.versionProperties().supportMonorepo(defaultMonorepoProperties).useHighestVersion().build(),
+            VersionPropertiesBuilder.versionProperties().supportMonorepo(defaultMonorepoProperties).useHighestVersion().forceSnapshot().build()
         ]
     }
 
     private void configureContextWithVersionRules(VersionProperties versionRules) {
-        context = new Context(
+        context = new VersionResolutionContext(
             PropertiesBuilder.properties().withVersionRules(versionRules).build(),
             context.repository(),
-            scmProperties(directory).build(),
-            directory,
+            scmProperties(temporaryFolder).build(),
+            temporaryFolder,
             new LocalOnlyResolver(true)
         )
 
@@ -217,8 +216,8 @@ class VersionResolverSubfolderTest extends RepositoryBasedTest {
     }
 
     private void createAndCommitFileInSubfolder(String path, String filename) {
-        def subfolder = new File(directory, path)
-        def dummyFile = new File(directory, "${path}/${filename}")
+        def subfolder = new File(temporaryFolder, path)
+        def dummyFile = new File(temporaryFolder, "${path}/${filename}")
         subfolder.mkdirs()
         dummyFile.createNewFile()
         repository.commit(['.'], "create file ${path}/${filename}")
